@@ -58,12 +58,33 @@ async function run() {
       res.send(result);
     })
 
+    app.get('/tickets/latest', async (req, res) => {
+
+      const result = await ticketsCollection
+        .find({ status: 'approved' })
+        .sort({ createdAt: -1 }) // newest first
+        .limit(6)
+        .toArray();
+
+      res.send(result);
+    });
+
+
+    app.get('/tickets/advertised', async (req, res) => {
+      const result = await ticketsCollection
+        .find({ status: 'approved', isAdvertised: true })
+        .toArray();
+
+      res.send(result);
+    });
+
     app.get('/tickets/:id', async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) }
       const result = await ticketsCollection.findOne(query);
       res.send(result);
     })
+
 
     app.patch('/tickets/:id', async (req, res) => {
       const id = req.params.id;
@@ -77,28 +98,55 @@ async function run() {
         departureTime
       } = req.body;
 
-      if (status !== undefined){
+      if (status !== undefined) {
         updatedFields.status = status;
       }
-      if (price !== undefined){
+      if (price !== undefined) {
         updatedFields.price = price;
       }
-      if (quantity !== undefined){
+      if (quantity !== undefined) {
         updatedFields.quantity = quantity;
       }
-      if (departureDate !== undefined){
-         updatedFields.departureDate = departureDate;
+      if (departureDate !== undefined) {
+        updatedFields.departureDate = departureDate;
       }
-      if (departureTime !== undefined){
+      if (departureTime !== undefined) {
         updatedFields.departureTime = departureTime;
       }
-      
+
       const updatedDoc = {
-        $set:updatedFields 
+        $set: updatedFields
       }
       const result = await ticketsCollection.updateOne(query, updatedDoc)
       res.send(result)
     })
+
+    app.patch('/tickets/advertise/:id', async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) }
+      const { isAdvertised } = req.body;
+      const updatedDoc = {
+        $set: { isAdvertised }
+      }
+
+      // If trying to advertise → check limit
+      if (isAdvertised === true) {
+        const advertisedCount = await ticketsCollection.countDocuments({
+          isAdvertised: true,
+        });
+
+        if (advertisedCount >= 6) {
+          return res.status(400).send({
+            message: 'Maximum 6 tickets can be advertised',
+          });
+        }
+      }
+
+      const result = await ticketsCollection.updateOne(query, updatedDoc);
+
+      res.send(result);
+    });
+
 
     app.delete('/tickets/:id', async (req, res) => {
       const id = req.params.id;
