@@ -3,6 +3,7 @@ const express = require('express')
 const cors = require('cors');
 const app = express()
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
+const stripe = require('stripe')(process.env.STRIPE_SECRET);
 
 const port = process.env.PORT || 3000
 
@@ -32,6 +33,7 @@ async function run() {
     // const userCollection = db.collection('users');
     const ticketsCollection = db.collection('tickets');
     const bookingsCollection = db.collection('bookings');
+    const paymentCollection = db.collection('payments');
 
     // tickets apis
 
@@ -192,7 +194,181 @@ async function run() {
       res.send(result)
     })
 
+    // payment related apis
+    app.post('/payment-checkout-session', async (req, res) => {
+      const paymentInfo = req.body;
+      const usdAmount = parseInt(paymentInfo.totalPrice / 120) * 100;
+      const session = await stripe.checkout.sessions.create({
+        line_items: [
+          {
+            price_data: {
+              currency: 'usd',
+              unit_amount: usdAmount,
+              product_data: {
+                name: `Please pay for: ${paymentInfo.ticketTitle}`
+              }
+            },
+            quantity: 1,
+          },
+        ],
+        mode: 'payment',
+        metadata: {
+          bookingId: paymentInfo.bookingId,
+          ticketId: paymentInfo.ticketId,
+          ticketTitle: paymentInfo.ticketTitle
+        },
+        customer_email: paymentInfo.userEmail,
+        success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancelled`,
+      })
+      console.log(session)
+      res.send({ url: session.url })
+    })
 
+    app.patch('/payment-success', async (req, res) => {
+      const sessionId = req.query.session_id;
+      const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+      if (session.payment_status !== 'paid') {
+        return res.status(400).send({ message: 'Payment not completed' });
+      }
+
+      const transactionId = session.payment_intent;
+
+      // Prevent duplicate payment record
+      const paymentExist = await paymentCollection.findOne({ transactionId });
+      if (paymentExist) {
+        return res.send({ message: 'Already processed' });
+      }
+
+      const bookingId = session.metadata.bookingId;
+
+      const bookingUpdateResult = await bookingsCollection.updateOne(
+        {
+          _id: new ObjectId(bookingId),
+          paymentStatus: { $ne: 'paid' }
+        },
+        {
+          $set: { paymentStatus: 'paid' }
+        }
+      );
+
+      
+      if (bookingUpdateResult.modifiedCount === 0) {
+        return res.send({ message: 'Booking already paid' });
+      }
+
+      
+      const booking = await bookingsCollection.findOne({
+        _id: new ObjectId(bookingId)
+      });
+
+     
+      const ticketResult = await ticketsCollection.updateOne(
+        {
+          _id: new ObjectId(booking.ticketId),
+          quantity: { $gte: booking.quantity }
+        },
+        {
+          $inc: { quantity: -booking.quantity }
+        }
+      );
+
+      if (ticketResult.modifiedCount === 0) {
+        
+        await bookingsCollection.updateOne(
+          { _id: booking._id },
+          { $set: { paymentStatus: 'pending' } }
+        );
+
+        return res.status(400).send({
+          message: 'Not enough ticket quantity'
+        });
+      }
+
+      const payment = {
+        amount: session.amount_total / 100,
+        currency: session.currency,
+        customerEmail: session.customer_email,
+        bookingId,
+        transactionId,
+        paymentStatus: session.payment_status,
+        paidAt: new Date()
+      };
+
+      await paymentCollection.insertOne(payment);
+
+      res.send({
+        success: true,
+        message: 'Payment processed successfully'
+      });
+    });
+
+
+    // app.patch('/payment-success', async (req, res) => {
+    //   const sessionId = req.query.session_id;
+    //   const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+    //   // console.log('session retrieve', session)
+    //   const transactionId = session.payment_intent;
+    //   const query = { transactionId: transactionId }
+    //   const paymentExist = await paymentCollection.findOne(query);
+
+    //   if (paymentExist) {
+    //     return res.send({
+    //       message: 'already exists',
+    //       transactionId
+    //     })
+    //   }
+
+    //   if (session.payment_status === 'paid') {
+    //     const bookingId = session.metadata.bookingId;
+
+    //     const query = { _id: new ObjectId(bookingId) };
+
+    //     const update = {
+    //       $set: {
+    //         paymentStatus: 'paid',
+    //       },
+    //     };
+
+    //     const result = await bookingsCollection.updateOne(query, update);
+
+    //     const payment = {
+    //       amount: session.amount_total / 100,
+    //       currency: session.currency,
+    //       customerEmail: session.customer_email,
+    //       parcelId: session.metadata.parcelId,
+    //       parcelName: session.metadata.parcelName,
+    //       transactionId: session.payment_intent,
+    //       paymentStatus: session.payment_status,
+    //       paidAt: new Date(),
+    //     }
+    //     if (session.payment_status === 'paid') {
+    //       const resultPayment = await paymentCollection.insertOne(payment);
+    //       res.send({
+    //         success: true,
+    //         modifyParcel: result,
+    //         transactionId: session.payment_intent,
+    //         paymentInfo: resultPayment
+    //       })
+    //     }
+    //   }
+    //   res.status(400).send({ message: 'Payment not completed' });
+    // })
+
+
+    app.get('/payments', async (req, res) => {
+      const email = req.query.email;
+      const query = {}
+      if (email) {
+        query.customerEmail = email
+      }
+
+      const cursor = paymentCollection.find(query).sort({ paidAt: -1 });
+      const result = await cursor.toArray();
+      res.send(result)
+    })
 
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
