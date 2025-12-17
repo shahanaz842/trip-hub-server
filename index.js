@@ -66,6 +66,19 @@ async function run() {
     const paymentCollection = db.collection('payments');
     const vendorsCollection = db.collection('vendors');
 
+    // middleware with database access- before allowing admin activity
+    // must be used after verifyFBToken middleware
+    const verifyAdmin = async (req, res, next) => {
+      const email = req.decoded_email;
+      const query = { email }
+      const user = await userCollection.findOne(query);
+
+      if (!user || user.role !== 'admin') {
+        return res.status(403).send({ message: 'forbidden access' })
+      }
+      next();
+    }
+
     // user related apis
     app.get('/users', verifyFBToken, async (req, res) => {
       const searchText = req.query.searchText;
@@ -83,7 +96,7 @@ async function run() {
       res.send(result);
     })
 
-     app.get('/users/:email/role', async (req, res) => {
+    app.get('/users/:email/role', async (req, res) => {
       const email = req.params.email;
       const query = { email }
       const user = await userCollection.findOne(query)
@@ -105,7 +118,7 @@ async function run() {
       res.send(result);
     })
 
-    app.patch('/users/:id/role', verifyFBToken, async (req, res) => {
+    app.patch('/users/:id/role', verifyFBToken, verifyAdmin, async (req, res) => {
       const id = req.params.id;
       const roleInfo = req.body;
       const query = { _id: new ObjectId(id) }
@@ -429,14 +442,9 @@ async function run() {
       res.send(result);
     })
 
-    app.patch('/vendors/:id', verifyFBToken, async (req, res) => {
+    app.patch('/vendors/:id', verifyFBToken, verifyAdmin, async (req, res) => {
       const { status, email } = req.body;
       const id = req.params.id;
-
-      // Only admin allowed
-      if (req.decoded_role !== 'admin') {
-        return res.status(403).send({ message: 'Forbidden' });
-      }
 
       // Update vendor
       const vendorResult = await vendorsCollection.updateOne(
@@ -455,10 +463,7 @@ async function run() {
       res.send(vendorResult);
     });
 
-    app.patch('/vendors/fraud/:email', verifyFBToken, async (req, res) => {
-      // if (req.decoded_role !== 'admin') {
-      //   return res.status(403).send({ message: 'Forbidden' });
-      // }
+    app.patch('/vendors/fraud/:email', verifyFBToken, verifyAdmin, async (req, res) => {
 
       const email = req.params.email;
 
@@ -493,7 +498,7 @@ async function run() {
     });
 
 
-    app.delete('/vendors/:id', verifyFBToken, async (req, res) => {
+    app.delete('/vendors/:id', verifyFBToken, verifyAdmin, async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) }
       const result = await vendorsCollection.deleteOne(query);
