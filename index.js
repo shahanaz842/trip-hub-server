@@ -68,9 +68,26 @@ async function run() {
 
     // user related apis
     app.get('/users', verifyFBToken, async (req, res) => {
-      const cursor = userCollection.find(query).sort({ createdAt: -1 }).limit(10);
+      const searchText = req.query.searchText;
+      const query = {}
+      if (searchText) {
+        // query.displayName = { $regex: searchText, $options: 'i'}
+        query.$or = [
+          { displayName: { $regex: searchText, $options: 'i' } },
+          { email: { $regex: searchText, $options: 'i' } }
+        ]
+      }
+
+      const cursor = userCollection.find(query).sort({ createdAt: -1 }).limit(5);
       const result = await cursor.toArray();
       res.send(result);
+    })
+
+     app.get('/users/:email/role', async (req, res) => {
+      const email = req.params.email;
+      const query = { email }
+      const user = await userCollection.findOne(query)
+      res.send({ role: user?.role || 'user' })
     })
 
     app.post('/users', async (req, res) => {
@@ -88,19 +105,33 @@ async function run() {
       res.send(result);
     })
 
+    app.patch('/users/:id/role', verifyFBToken, async (req, res) => {
+      const id = req.params.id;
+      const roleInfo = req.body;
+      const query = { _id: new ObjectId(id) }
+      const updatedDoc = {
+        $set: {
+          role: roleInfo.role
+        }
+      }
+      const result = await userCollection.updateOne(query, updatedDoc);
+      res.send(result);
+    })
+
 
     // tickets apis
 
     // save a ticket data in db
     app.post('/tickets', async (req, res) => {
+      const query = { isVisible: true }
       const ticketData = req.body;
-      const result = await ticketsCollection.insertOne(ticketData);
+      const result = await ticketsCollection.insertOne(ticketData, query);
       res.send(result);
     })
 
     // get all tickets data
     app.get('/tickets', async (req, res) => {
-      const query = {}
+      const query = { isVisible: true }
       const { email, status } = req.query;
 
       if (email) {
@@ -117,7 +148,7 @@ async function run() {
     app.get('/tickets/latest', async (req, res) => {
 
       const result = await ticketsCollection
-        .find({ status: 'approved' })
+        .find({ status: 'approved', isVisible: true })
         .sort({ createdAt: -1 }) // newest first
         .limit(6)
         .toArray();
@@ -128,7 +159,7 @@ async function run() {
 
     app.get('/tickets/advertised', async (req, res) => {
       const result = await ticketsCollection
-        .find({ status: 'approved', isAdvertised: true })
+        .find({ status: 'approved', isAdvertised: true, isVisible: true })
         .toArray();
 
       res.send(result);
@@ -399,31 +430,68 @@ async function run() {
     })
 
     app.patch('/vendors/:id', verifyFBToken, async (req, res) => {
-      const status = req.body.status;
+      const { status, email } = req.body;
       const id = req.params.id;
-      const query = { _id: new ObjectId(id) }
-      const updateDoc = {
-        $set: {
-          status: status,
-        }
+
+      // Only admin allowed
+      if (req.decoded_role !== 'admin') {
+        return res.status(403).send({ message: 'Forbidden' });
       }
 
-      const result = await vendorsCollection.updateOne(query, updateDoc);
+      // Update vendor
+      const vendorResult = await vendorsCollection.updateOne(
+        { _id: new ObjectId(id), email },
+        { $set: { status } }
+      );
 
+      // If approved → update user role
       if (status === 'approved') {
-        const email = req.body.email;
-        const userQuery = { email }
-        const updateUser = {
+        await userCollection.updateOne(
+          { email },
+          { $set: { role: 'vendor' } }
+        );
+      }
+
+      res.send(vendorResult);
+    });
+
+    app.patch('/vendors/fraud/:email', verifyFBToken, async (req, res) => {
+      // if (req.decoded_role !== 'admin') {
+      //   return res.status(403).send({ message: 'Forbidden' });
+      // }
+
+      const email = req.params.email;
+
+      // 1 Mark vendor as fraud
+      const vendorResult = await vendorsCollection.updateOne(
+        { email },
+        { $set: { status: 'fraud' } }
+      );
+
+      // 2 Downgrade user role
+      const userResult = await userCollection.updateOne(
+        { email },
+        { $set: { role: 'user' } }
+      );
+
+      // 3 Hide ALL tickets from this vendor
+      const ticketResult = await ticketsCollection.updateMany(
+        { "vendor.email": email },
+        {
           $set: {
-            role: 'vendor'
+            isVisible: false,
+            status: 'blocked'
           }
         }
-        const userResult = await userCollection.updateOne(userQuery, updateUser);
-      //   res.send(userResult)
-      }
+      );
 
-      res.send(result);
-    })
+      res.send({
+        vendorResult,
+        userResult,
+        ticketResult
+      });
+    });
+
 
     app.delete('/vendors/:id', verifyFBToken, async (req, res) => {
       const id = req.params.id;
