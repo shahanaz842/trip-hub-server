@@ -7,10 +7,40 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET);
 
 const port = process.env.PORT || 3000
 
+const admin = require("firebase-admin");
+
+const serviceAccount = require("./trip-hub-firebase-adminsdk.json");
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount)
+});
+
+
 
 // middleware
 app.use(express.json());
 app.use(cors());
+
+const verifyFBToken = async (req, res, next) => {
+  console.log("header", req.headers.authorization)
+
+  const token = req.headers.authorization;
+  if (!token) {
+    return res.status(401).send({ message: 'Unauthorized Access' })
+  }
+
+  try {
+    const idToken = token.split(' ')[1];
+    const decoded = await admin.auth().verifyIdToken(idToken);
+    console.log('decoded in the token', decoded)
+    req.decoded_email = decoded.email;
+    next();
+  }
+  catch (err) {
+    return res.status(401).send({ message: 'unauthorized access' })
+  }
+}
+
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.j32vxdc.mongodb.net/?appName=Cluster0`;
 
@@ -30,10 +60,34 @@ async function run() {
     await client.connect();
 
     const db = client.db('trip_hub_db');
-    // const userCollection = db.collection('users');
+    const userCollection = db.collection('users');
     const ticketsCollection = db.collection('tickets');
     const bookingsCollection = db.collection('bookings');
     const paymentCollection = db.collection('payments');
+    const vendorsCollection = db.collection('vendors');
+
+    // user related apis
+    app.get('/users', verifyFBToken, async (req, res) => {
+      const cursor = userCollection.find(query).sort({ createdAt: -1 }).limit(10);
+      const result = await cursor.toArray();
+      res.send(result);
+    })
+
+    app.post('/users', async (req, res) => {
+      const user = req.body;
+      user.role = 'user';
+      user.createdAt = new Date();
+      const email = user.email;
+      const userExists = await userCollection.findOne({ email });
+
+      if (userExists) {
+        return res.send({ message: 'user exists' })
+      }
+
+      const result = await userCollection.insertOne(user);
+      res.send(result);
+    })
+
 
     // tickets apis
 
@@ -253,17 +307,17 @@ async function run() {
         }
       );
 
-      
+
       if (bookingUpdateResult.modifiedCount === 0) {
         return res.send({ message: 'Booking already paid' });
       }
 
-      
+
       const booking = await bookingsCollection.findOne({
         _id: new ObjectId(bookingId)
       });
 
-     
+
       const ticketResult = await ticketsCollection.updateOne(
         {
           _id: new ObjectId(booking.ticketId),
@@ -275,7 +329,7 @@ async function run() {
       );
 
       if (ticketResult.modifiedCount === 0) {
-        
+
         await bookingsCollection.updateOne(
           { _id: booking._id },
           { $set: { paymentStatus: 'pending' } }
@@ -290,6 +344,7 @@ async function run() {
         amount: session.amount_total / 100,
         currency: session.currency,
         customerEmail: session.customer_email,
+        ticketTitle: session.metadata.ticketTitle,
         bookingId,
         transactionId,
         paymentStatus: session.payment_status,
@@ -304,71 +359,80 @@ async function run() {
       });
     });
 
-
-    // app.patch('/payment-success', async (req, res) => {
-    //   const sessionId = req.query.session_id;
-    //   const session = await stripe.checkout.sessions.retrieve(sessionId);
-
-    //   // console.log('session retrieve', session)
-    //   const transactionId = session.payment_intent;
-    //   const query = { transactionId: transactionId }
-    //   const paymentExist = await paymentCollection.findOne(query);
-
-    //   if (paymentExist) {
-    //     return res.send({
-    //       message: 'already exists',
-    //       transactionId
-    //     })
-    //   }
-
-    //   if (session.payment_status === 'paid') {
-    //     const bookingId = session.metadata.bookingId;
-
-    //     const query = { _id: new ObjectId(bookingId) };
-
-    //     const update = {
-    //       $set: {
-    //         paymentStatus: 'paid',
-    //       },
-    //     };
-
-    //     const result = await bookingsCollection.updateOne(query, update);
-
-    //     const payment = {
-    //       amount: session.amount_total / 100,
-    //       currency: session.currency,
-    //       customerEmail: session.customer_email,
-    //       parcelId: session.metadata.parcelId,
-    //       parcelName: session.metadata.parcelName,
-    //       transactionId: session.payment_intent,
-    //       paymentStatus: session.payment_status,
-    //       paidAt: new Date(),
-    //     }
-    //     if (session.payment_status === 'paid') {
-    //       const resultPayment = await paymentCollection.insertOne(payment);
-    //       res.send({
-    //         success: true,
-    //         modifyParcel: result,
-    //         transactionId: session.payment_intent,
-    //         paymentInfo: resultPayment
-    //       })
-    //     }
-    //   }
-    //   res.status(400).send({ message: 'Payment not completed' });
-    // })
-
-
-    app.get('/payments', async (req, res) => {
+    app.get('/payments', verifyFBToken, async (req, res) => {
       const email = req.query.email;
+      console.log(req.decoded_email)
       const query = {}
       if (email) {
-        query.customerEmail = email
+        query.customerEmail = email;
+        if (email && email !== req.decoded_email) {
+          return res.status(403).send({ message: 'forbidden access' })
+        }
       }
 
       const cursor = paymentCollection.find(query).sort({ paidAt: -1 });
       const result = await cursor.toArray();
       res.send(result)
     })
+
+    // vendor related apis
+    app.get('/vendors', async (req, res) => {
+      const { status } = req.query;
+      const query = {}
+
+      if (status) {
+        query.status = status;
+      }
+
+      const cursor = vendorsCollection.find(query);
+      const result = await cursor.toArray();
+      res.send(result);
+    })
+
+    app.post('/vendors', async (req, res) => {
+      const vendor = req.body;
+      vendor.status = 'pending';
+      vendor.createdAt = new Date();
+
+      const result = await vendorsCollection.insertOne(vendor);
+      res.send(result);
+    })
+
+    app.patch('/vendors/:id', verifyFBToken, async (req, res) => {
+      const status = req.body.status;
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) }
+      const updateDoc = {
+        $set: {
+          status: status,
+        }
+      }
+
+      const result = await vendorsCollection.updateOne(query, updateDoc);
+
+      if (status === 'approved') {
+        const email = req.body.email;
+        const userQuery = { email }
+        const updateUser = {
+          $set: {
+            role: 'vendor'
+          }
+        }
+        const userResult = await userCollection.updateOne(userQuery, updateUser);
+      //   res.send(userResult)
+      }
+
+      res.send(result);
+    })
+
+    app.delete('/vendors/:id', verifyFBToken, async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) }
+      const result = await vendorsCollection.deleteOne(query);
+      res.send(result);
+    })
+
+
 
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
