@@ -79,6 +79,17 @@ async function run() {
       next();
     }
 
+    const verifyVendor = async (req, res, next) => {
+      const email = req.decoded_email;
+      const query = { email }
+      const user = await userCollection.findOne(query);
+
+      if (!user || user.role !== 'vendor') {
+        return res.status(403).send({ message: 'forbidden access' })
+      }
+      next();
+    }
+
     // user related apis
     app.get('/users', verifyFBToken, async (req, res) => {
       const searchText = req.query.searchText;
@@ -134,14 +145,6 @@ async function run() {
 
     // tickets apis
 
-    // save a ticket data in db
-    app.post('/tickets', async (req, res) => {
-      const query = { isVisible: true }
-      const ticketData = req.body;
-      const result = await ticketsCollection.insertOne(ticketData, query);
-      res.send(result);
-    })
-
     // get all tickets data
     app.get('/tickets', async (req, res) => {
       const query = { isVisible: true }
@@ -185,6 +188,13 @@ async function run() {
       res.send(result);
     })
 
+    // save a ticket data in db
+    app.post('/tickets', async (req, res) => {
+      const query = { isVisible: true }
+      const ticketData = req.body;
+      const result = await ticketsCollection.insertOne(ticketData, query);
+      res.send(result);
+    })
 
     app.patch('/tickets/:id', async (req, res) => {
       const id = req.params.id;
@@ -221,7 +231,7 @@ async function run() {
       res.send(result)
     })
 
-    app.patch('/tickets/advertise/:id', async (req, res) => {
+    app.patch('/tickets/advertise/:id',verifyFBToken, verifyAdmin, async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) }
       const { isAdvertised } = req.body;
@@ -248,7 +258,7 @@ async function run() {
     });
 
 
-    app.delete('/tickets/:id', async (req, res) => {
+    app.delete('/tickets/:id', verifyFBToken, verifyVendor, async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) }
       const result = await ticketsCollection.deleteOne(query);
@@ -279,7 +289,7 @@ async function run() {
       res.send(result);
     })
 
-    app.patch('/bookings/:id', async (req, res) => {
+    app.patch('/bookings/:id', verifyFBToken, verifyVendor, async (req, res) => {
       const bookingStatus = req.body.bookingStatus;
       const id = req.params.id;
       const query = { _id: new ObjectId(id) }
@@ -432,6 +442,62 @@ async function run() {
       const result = await cursor.toArray();
       res.send(result);
     })
+
+    app.get('/vendor/dashboard-stats', verifyFBToken, verifyVendor, async (req, res) => {
+      const email = req.decoded_email;
+
+      const [revenue, sold, added] = await Promise.all([
+        paymentCollection.aggregate([
+          {
+            $lookup: {
+              from: 'bookings',
+              localField: 'bookingId',
+              foreignField: '_id',
+              as: 'booking'
+            }
+          },
+          { $unwind: '$booking' },
+          { $match: { 'booking.vendorEmail': email } },
+          {
+            $group: {
+              _id: null,
+              totalRevenue: { $sum: '$amount' }
+            }
+          }
+        ]).toArray(),
+
+        bookingsCollection.aggregate([
+          {
+            $match: {
+              vendorEmail: email,
+              paymentStatus: 'paid'
+            }
+          },
+          {
+            $group: {
+              _id: null,
+              totalTicketsSold: { $sum: '$quantity' }
+            }
+          }
+        ]).toArray(),
+
+        ticketsCollection.aggregate([
+          { $match: { vendorEmail: email } },
+          {
+            $group: {
+              _id: null,
+              totalTicketsAdded: { $sum: '$totalQuantity' }
+            }
+          }
+        ]).toArray()
+      ]);
+
+      res.send({
+        totalRevenue: revenue[0]?.totalRevenue || 0,
+        totalTicketsSold: sold[0]?.totalTicketsSold || 0,
+        totalTicketsAdded: added[0]?.totalTicketsAdded || 0
+      });
+    });
 
     app.post('/vendors', async (req, res) => {
       const vendor = req.body;
