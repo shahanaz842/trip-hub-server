@@ -92,25 +92,27 @@ async function run() {
 
     // user related apis
     app.get('/users', verifyFBToken, async (req, res) => {
-      const searchText = req.query.searchText;
-      const query = {}
-      if (searchText) {
-        // query.displayName = { $regex: searchText, $options: 'i'}
-        query.$or = [
-          { displayName: { $regex: searchText, $options: 'i' } },
-          { email: { $regex: searchText, $options: 'i' } }
-        ]
-      }
+      const adminEmail = req.decoded_email;
+      const searchText = req.query.searchText || '';
 
-      const cursor = userCollection.find(query).sort({ createdAt: -1 }).limit(5);
+      const cursor = userCollection.find({
+        $and: [
+          { email: { $ne: adminEmail } },
+          {
+            $or: [
+              { displayName: { $regex: searchText, $options: 'i' } },
+              { email: { $regex: searchText, $options: 'i' } }
+            ]
+          }
+        ]
+      }).sort({ createdAt: -1 });
+
       const result = await cursor.toArray();
       res.send(result);
-    })
+    });
 
-    app.get('/users/:email/role', async (req, res) => {
-      const email = req.params.email;
-      const query = { email }
-      const user = await userCollection.findOne(query)
+    app.get('/users/role', verifyFBToken, async (req, res) => {
+      const user = await userCollection.findOne({ email: req.decoded_email })
       res.send({ role: user?.role || 'user' })
     })
 
@@ -129,18 +131,43 @@ async function run() {
       res.send(result);
     })
 
-    app.patch('/users/:id/role', verifyFBToken, verifyAdmin, async (req, res) => {
-      const id = req.params.id;
-      const roleInfo = req.body;
-      const query = { _id: new ObjectId(id) }
-      const updatedDoc = {
-        $set: {
-          role: roleInfo.role
+    app.patch('/update-role', verifyFBToken, verifyAdmin, async (req, res) => {
+      const { email, role } = req.body;
+
+      if (!email || !role) {
+        return res.status(400).send({ message: 'Missing email or role' });
+      }
+
+      //  Update user role
+      const userResult = await userCollection.updateOne(
+        { email },
+        { $set: { role } }
+      );
+
+      //  If role is vendor → create vendor profile
+      let vendorResult = null;
+
+      if (role === 'vendor') {
+        const existingVendor = await vendorsCollection.findOne({ email });
+
+        if (!existingVendor) {
+          vendorResult = await vendorsCollection.insertOne({
+            name: req.body.name || 'Unknown Vendor',
+            image: req.body.name,
+            email,
+            status: 'approved', // since admin is assigning
+            createdAt: new Date(),
+            updatedAt: null
+          });
         }
       }
-      const result = await userCollection.updateOne(query, updatedDoc);
-      res.send(result);
-    })
+
+      res.send({
+        userModified: userResult.modifiedCount,
+        vendorCreated: vendorResult?.insertedId || null
+      });
+    });
+
 
 
     // tickets apis
@@ -190,9 +217,8 @@ async function run() {
 
     // save a ticket data in db
     app.post('/tickets', async (req, res) => {
-      const query = { isVisible: true }
       const ticketData = req.body;
-      const result = await ticketsCollection.insertOne(ticketData, query);
+      const result = await ticketsCollection.insertOne(ticketData);
       res.send(result);
     })
 
@@ -231,7 +257,7 @@ async function run() {
       res.send(result)
     })
 
-    app.patch('/tickets/advertise/:id',verifyFBToken, verifyAdmin, async (req, res) => {
+    app.patch('/tickets/advertise/:id', verifyFBToken, verifyAdmin, async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) }
       const { isAdvertised } = req.body;
@@ -323,7 +349,8 @@ async function run() {
         metadata: {
           bookingId: paymentInfo.bookingId,
           ticketId: paymentInfo.ticketId,
-          ticketTitle: paymentInfo.ticketTitle
+          ticketTitle: paymentInfo.ticketTitle,
+          vendorEmail: paymentInfo.vendorEmail
         },
         customer_email: paymentInfo.userEmail,
         success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
@@ -399,6 +426,7 @@ async function run() {
         currency: session.currency,
         customerEmail: session.customer_email,
         ticketTitle: session.metadata.ticketTitle,
+        vendorEmail: session.metadata.vendorEmail,
         bookingId,
         transactionId,
         paymentStatus: session.payment_status,
@@ -499,35 +527,35 @@ async function run() {
       });
     });
 
-    app.post('/vendors', async (req, res) => {
-      const vendor = req.body;
-      vendor.status = 'pending';
-      vendor.createdAt = new Date();
+    app.post('/vendors', verifyFBToken, async (req, res) => {
+      const { name, image } = req.body;
+      const email = req.decoded_email;
+
+      // basic validation
+      if (!email || !name) {
+        return res.status(400).send({ message: 'Missing required fields' });
+      }
+
+      // prevent duplicate vendor application
+      const existingVendor = await vendorsCollection.findOne({ email });
+
+      if (existingVendor) {
+        return res.status(409).send({ message: 'Vendor already exists' });
+      }
+
+      const vendor = {
+        name,
+        image: image || null,
+        email,
+        status: 'pending',        // default status
+        createdAt: new Date(),
+        updatedAt: null
+      };
 
       const result = await vendorsCollection.insertOne(vendor);
       res.send(result);
-    })
-
-    app.patch('/vendors/:id', verifyFBToken, verifyAdmin, async (req, res) => {
-      const { status, email } = req.body;
-      const id = req.params.id;
-
-      // Update vendor
-      const vendorResult = await vendorsCollection.updateOne(
-        { _id: new ObjectId(id), email },
-        { $set: { status } }
-      );
-
-      // If approved → update user role
-      if (status === 'approved') {
-        await userCollection.updateOne(
-          { email },
-          { $set: { role: 'vendor' } }
-        );
-      }
-
-      res.send(vendorResult);
     });
+
 
     app.patch('/vendors/fraud/:email', verifyFBToken, verifyAdmin, async (req, res) => {
 
@@ -562,6 +590,56 @@ async function run() {
         ticketResult
       });
     });
+
+    app.patch('/vendors/:id', verifyFBToken, verifyAdmin, async (req, res) => {
+      const { status } = req.body;
+      const id = req.params.id;
+
+      const allowedStatus = ['approved', 'rejected', 'pending'];
+      if (!allowedStatus.includes(status)) {
+        return res.status(400).send({ message: 'Invalid status' });
+      }
+
+      const session = client.startSession();
+
+      try {
+        session.startTransaction();
+
+        const vendor = await vendorsCollection.findOne(
+          { _id: new ObjectId(id) },
+          { session }
+        );
+
+        if (!vendor) {
+          await session.abortTransaction();
+          return res.status(404).send({ message: 'Vendor not found' });
+        }
+
+        await vendorsCollection.updateOne(
+          { _id: vendor._id },
+          { $set: { status, updatedAt: new Date() } },
+          { session }
+        );
+
+        if (status === 'approved') {
+          await userCollection.updateOne(
+            { email: vendor.email },
+            { $set: { role: 'vendor' } },
+            { session }
+          );
+        }
+
+        await session.commitTransaction();
+        res.send({ success: true });
+
+      } catch (error) {
+        await session.abortTransaction();
+        res.status(500).send({ message: 'Failed to update vendor' });
+      } finally {
+        session.endSession();
+      }
+    });
+
 
 
     app.delete('/vendors/:id', verifyFBToken, verifyAdmin, async (req, res) => {
