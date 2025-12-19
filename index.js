@@ -93,19 +93,9 @@ async function run() {
     // user related apis
     app.get('/users', verifyFBToken, async (req, res) => {
       const adminEmail = req.decoded_email;
-      const searchText = req.query.searchText || '';
 
-      const cursor = userCollection.find({
-        $and: [
-          { email: { $ne: adminEmail } },
-          {
-            $or: [
-              { displayName: { $regex: searchText, $options: 'i' } },
-              { email: { $regex: searchText, $options: 'i' } }
-            ]
-          }
-        ]
-      }).sort({ createdAt: -1 });
+      const cursor = userCollection.find({ email: { $ne: adminEmail } },)
+        .sort({ createdAt: -1 });
 
       const result = await cursor.toArray();
       res.send(result);
@@ -114,6 +104,12 @@ async function run() {
     app.get('/users/role', verifyFBToken, async (req, res) => {
       const user = await userCollection.findOne({ email: req.decoded_email })
       res.send({ role: user?.role || 'user' })
+    })
+
+    app.get('/users/:id', async (req, res) => {
+      const id = req.params.id;
+      const user = await userCollection.findOne({ _id: new ObjectId(id) });
+      res.send(user)
     })
 
     app.post('/users', async (req, res) => {
@@ -229,7 +225,6 @@ async function run() {
       const {
         status,
         price,
-        quantity,
         departureDate,
         departureTime
       } = req.body;
@@ -239,9 +234,6 @@ async function run() {
       }
       if (price !== undefined) {
         updatedFields.price = price;
-      }
-      if (quantity !== undefined) {
-        updatedFields.quantity = quantity;
       }
       if (departureDate !== undefined) {
         updatedFields.departureDate = departureDate;
@@ -376,7 +368,7 @@ async function run() {
         return res.send({ message: 'Already processed' });
       }
 
-      const bookingId = session.metadata.bookingId;
+      const bookingId = session?.metadata.bookingId;
 
       const bookingUpdateResult = await bookingsCollection.updateOne(
         {
@@ -442,7 +434,7 @@ async function run() {
     });
 
     app.get('/payments', verifyFBToken, async (req, res) => {
-      const email = req.query.email;
+      const email = req.decoded_email;
       console.log(req.decoded_email)
       const query = {}
       if (email) {
@@ -476,16 +468,7 @@ async function run() {
 
       const [revenue, sold, added] = await Promise.all([
         paymentCollection.aggregate([
-          {
-            $lookup: {
-              from: 'bookings',
-              localField: 'bookingId',
-              foreignField: '_id',
-              as: 'booking'
-            }
-          },
-          { $unwind: '$booking' },
-          { $match: { 'booking.vendorEmail': email } },
+          { $match: { vendorEmail: email } },
           {
             $group: {
               _id: null,
@@ -510,7 +493,13 @@ async function run() {
         ]).toArray(),
 
         ticketsCollection.aggregate([
-          { $match: { vendorEmail: email } },
+          {
+            $match: {
+              "vendor.email": email,
+              status: 'approved',
+              isVisible: true
+            }
+          },
           {
             $group: {
               _id: null,
