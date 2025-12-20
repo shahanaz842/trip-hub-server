@@ -102,9 +102,21 @@ async function run() {
     });
 
     app.get('/users/role', verifyFBToken, async (req, res) => {
-      const user = await userCollection.findOne({ email: req.decoded_email })
-      res.send({ role: user?.role || 'user' })
-    })
+      const email = req.decoded_email;
+
+      const user = await userCollection.findOne({ email });
+
+      if (!user) {
+        return res.status(404).send({ role: null, message: 'User not found' });
+      }
+
+      if (!user.role) {
+        return res.status(200).send({ role: 'user' });
+      }
+
+      res.send({ role: user.role });
+    });
+
 
     app.get('/users/:id', async (req, res) => {
       const id = req.params.id;
@@ -171,8 +183,10 @@ async function run() {
     // get all tickets data
     app.get('/tickets', async (req, res) => {
       const query = { isVisible: true }
-      const { email, status } = req.query;
+      const { email, status, searchText, transportType, limit = 6, skip = 0 } = req.query;
 
+
+      console.log(limit, skip)
       if (email) {
         query["vendor.email"] = email;
       }
@@ -180,8 +194,26 @@ async function run() {
       if (status) {
         query.status = status;
       }
-      const result = await ticketsCollection.find(query).toArray();
-      res.send(result);
+
+      if (transportType) {
+        query.transportType = { $regex: `^${transportType}$`, $options: 'i' };
+      }
+      if (searchText) {
+        query.$or = [
+          { from: { $regex: searchText, $options: 'i' } },
+          { to: { $regex: searchText, $options: 'i' } }
+        ]
+      }
+      const tickets = await ticketsCollection
+        .find(query)
+        .sort({ price: 1 })
+        .skip(Number(skip))
+        .limit(Number(limit))
+        .toArray()
+
+      const count = await ticketsCollection.countDocuments(query);
+      console.log('query:', query);
+      res.send({ tickets, total: count });
     })
 
     app.get('/tickets/latest', async (req, res) => {
